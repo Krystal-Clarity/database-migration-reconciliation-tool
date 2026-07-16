@@ -54,14 +54,11 @@ class ColumnComparison:
         self.logger.setLevel(logger_level)
         self.logger.debug("Initializing ColumnComparison")
         self.logger.debug(
-            "input_dataframes count=%s, join_key_columns=%s, "
-            "include_pairwise_comparisons=%s, columns_to_compare=%s, "
-            "max_rows_per_column=%s",
-            len(input_dataframes),
-            join_key_columns,
-            include_pairwise_comparisons,
-            columns_to_compare,
-            max_rows_per_column,
+            f"input_dataframes count={len(input_dataframes)}, "
+            f"join_key_columns={join_key_columns}, "
+            f"include_pairwise_comparisons={include_pairwise_comparisons}, "
+            f"columns_to_compare={columns_to_compare}, "
+            f"max_rows_per_column={max_rows_per_column}"
         )
         self._join_key_columns: list[str] = join_key_columns or []
         self._include_pairwise_comparisons: bool = include_pairwise_comparisons
@@ -127,8 +124,8 @@ class ColumnComparison:
             StructType(
                 [
                     StructField("column_name", StringType(), True),
-                    StructField("df0_value", StringType(), True),
-                    StructField("df1_value", StringType(), True),
+                    StructField("table1_value", StringType(), True),
+                    StructField("table2_value", StringType(), True),
                     StructField("column_match_0_1", BooleanType(), True),
                 ]
             ),
@@ -407,8 +404,8 @@ class ColumnComparison:
                 1. mismatched_rows_df: Rows with different values across inputs.
                 2. all_comparison_rows_df: All rows used to calculate statistics.
             Schema:
-                [*join_key_columns, column_name, df0_value, ...,
-                df{N-1}_value, column_match_i_j_..._N]
+                [*join_key_columns, column_name, <name>_value, ...,
+                <name>_value, column_match_i_j_..._N]
         """
         self.logger.debug("compare_dataframes_by_keys_multi_wide called")
         join_key_columns = self._join_key_columns
@@ -435,6 +432,7 @@ class ColumnComparison:
             for column_name in shared_columns
             if column_name not in join_key_columns
         ]
+        value_column_names = ["table1_value", "table2_value"]
 
         qualified_dataframes = [
             dataframe.select(
@@ -493,12 +491,12 @@ class ColumnComparison:
             comparison_select_expressions.append(
                 spark_functions.lit(column_name).alias("column_name")
             )
-            # create dfX_value column
-            for dataframe_index in range(dataframe_count):
+            # create value columns
+            for dataframe_index, value_column_name in enumerate(value_column_names):
                 comparison_select_expressions.append(
                     spark_functions.col(f"{column_name}_df{dataframe_index}")
                     .cast("string")
-                    .alias(f"df{dataframe_index}_value")
+                    .alias(value_column_name)
                 )
             # Add pairwise flags only when they differ from the all-input flag.
             if self._include_pairwise_comparisons and dataframe_count > 2:
@@ -550,11 +548,11 @@ class ColumnComparison:
 
         all_comparison_rows_df = comparison_rows_df.orderBy("column_name")
 
-        # filter to only mismatches across all df?_value columns
+        # filter to only mismatches across all value columns
         # build the array of values, distinct it, and require size > 1
         value_columns = [
-            spark_functions.col(f"df{dataframe_index}_value")
-            for dataframe_index in range(dataframe_count)
+            spark_functions.col(value_column_name)
+            for value_column_name in value_column_names
         ]
         mismatch_condition = (
             spark_functions.size(
@@ -744,7 +742,7 @@ class ColumnComparison:
             value_columns = [
                 column_name
                 for column_name in column_names
-                if column_name.startswith("df") and column_name.endswith("_value")
+                if column_name in {"table1_value", "table2_value"}
             ]
             is_schema_table = bool(schema_presence_columns) or (
                 "Match" in column_names
@@ -787,13 +785,13 @@ class ColumnComparison:
                     "Type 1": "Type — old",
                     "Type 2": "Type — new",
                     "column_name": "Column",
-                    "df0_value": "Old value",
-                    "df1_value": "New value",
                     "column_pair": "Column",
                     "diff_count": "Diff count",
                     "match_count": "Match count",
                     "diff_percentage": "Diff %",
                     "match_percentage": "Match %",
+                    "table1_value": "Table 1 value",
+                    "table2_value": "Table 2 value",
                 }
                 if column_name in header_mapping:
                     return header_mapping[column_name]
@@ -807,9 +805,6 @@ class ColumnComparison:
                 if column_name.startswith("Type "):
                     table_number = column_name.removeprefix("Type ")
                     return f"Type — table {table_number}"
-                if column_name.startswith("df") and column_name.endswith("_value"):
-                    table_number = column_name.removeprefix("df").removesuffix("_value")
-                    return f"Value — table {int(table_number) + 1}"
                 return column_name.replace("_", " ")
 
             # column names for top row of table
@@ -869,7 +864,11 @@ class ColumnComparison:
                 if status_label and status_label != "match":
                     highlighted_columns.update(
                         column_name
-                        for column_name in ("Schema 2", "Type 2", "df1_value")
+                        for column_name in (
+                            "Schema 2",
+                            "Type 2",
+                            "table2_value",
+                        )
                         if column_name in row_values
                     )
 
@@ -878,7 +877,11 @@ class ColumnComparison:
                     css_classes = []
                     if column_name in highlighted_columns:
                         css_classes.append("dgrid-hl")
-                    if column_name in {"Schema 1", "Type 1", "df0_value"}:
+                    if column_name in {
+                        "Schema 1",
+                        "Type 1",
+                        "table1_value",
+                    }:
                         css_classes.append("dgrid-old")
                     if column_name == "diff_percentage":
                         css_classes.append("dgrid-percent-diff")
@@ -1014,7 +1017,7 @@ class ColumnComparison:
             * 100,
         )
 
-        # Build column_pair including DataFrame suffixes (e.g. "purchase_date_df0_df1_df2")
+        # Build column_pair including DataFrame suffixes (e.g. "purchase_date_left_right")
         dataframe_indices = sorted(
             {
                 int(dataframe_index)
@@ -1023,7 +1026,7 @@ class ColumnComparison:
             }
         )
         dataframe_suffixes = [
-            spark_functions.lit(f"df{dataframe_index}")
+            spark_functions.lit(f"table{dataframe_index + 1}")
             for dataframe_index in dataframe_indices
         ]
         column_pair_expression = spark_functions.concat_ws(
