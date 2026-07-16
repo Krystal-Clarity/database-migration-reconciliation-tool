@@ -47,6 +47,7 @@ class ColumnComparison:
         join_key_columns: list[str] | None = None,
         include_pairwise_comparisons: bool = False,
         columns_to_compare: list[str] | None = None,
+        max_rows_per_column: int = 4,
         logger_level: int = logging.INFO,
     ) -> None:
         self.logger: logging.Logger = logging.getLogger(__name__)
@@ -54,11 +55,13 @@ class ColumnComparison:
         self.logger.debug("Initializing ColumnComparison")
         self.logger.debug(
             "input_dataframes count=%s, join_key_columns=%s, "
-            "include_pairwise_comparisons=%s, columns_to_compare=%s",
+            "include_pairwise_comparisons=%s, columns_to_compare=%s, "
+            "max_rows_per_column=%s",
             len(input_dataframes),
             join_key_columns,
             include_pairwise_comparisons,
             columns_to_compare,
+            max_rows_per_column,
         )
         self._join_key_columns: list[str] = join_key_columns or []
         self._include_pairwise_comparisons: bool = include_pairwise_comparisons
@@ -70,6 +73,9 @@ class ColumnComparison:
         if not isinstance(spark_session, SparkSession):
             raise RuntimeError("A Spark session is required for column comparison.")
         self._spark: SparkSession = spark_session
+        self._max_rows_per_column = self._validate_max_rows_per_column(
+            max_rows_per_column
+        )
 
         self._schema_comparison_df: DataFrame
         self._difference_analysis_df: DataFrame
@@ -94,6 +100,23 @@ class ColumnComparison:
             raise ValueError("ColumnComparison requires exactly two DataFrames.")
         self._input_dataframes = value.copy()
 
+    @property
+    def max_rows_per_column(self) -> int:
+        return self._max_rows_per_column
+
+    @max_rows_per_column.setter
+    def max_rows_per_column(self, value: int) -> None:
+        self._max_rows_per_column = self._validate_max_rows_per_column(value)
+        if hasattr(self, "_spark"):
+            self._initialize_comparison_dataframes()
+
+    def _validate_max_rows_per_column(self, value: int) -> int:
+        if not isinstance(value, int):
+            raise TypeError("max_rows_per_column must be an integer.")
+        if value < 1:
+            raise ValueError("max_rows_per_column must be at least 1.")
+        return value
+
     def _initialize_comparison_dataframes(self) -> None:
         if not self._join_key_columns:
             self._schema_comparison_df = self.compare_schemas(
@@ -105,15 +128,13 @@ class ColumnComparison:
             self._primary_key_comparison_df = self._empty_primary_key_comparison_df()
             return
 
-        self._schema_comparison_df = self.compare_schemas(
-            respect_column_order=False
-        )
+        self._schema_comparison_df = self.compare_schemas(respect_column_order=False)
         mismatched_rows_df, all_comparison_rows_df = self.difference_analysis_on_keys()
         self._key_analysis_stats_df = self.get_difference_analysis_stats(
-            all_comparison_rows_df
+            comparison_rows_df=all_comparison_rows_df
         )
         self._difference_analysis_df = self.truncate_by_column_limit(
-            mismatched_rows_df
+            all_comparison_rows_df=mismatched_rows_df
         )
         self._primary_key_comparison_df = self.compare_pks()
 
@@ -972,16 +993,12 @@ class ColumnComparison:
     def truncate_by_column_limit(
         self,
         all_comparison_rows_df: DataFrame,
-        max_rows_per_column: int = 4,
-        comparison_column_names: list[str] | None = None,
     ) -> DataFrame:
         """
         Limit the displayed comparison rows for each value of column_name.
 
         Args:
             all_comparison_rows_df: Comparison rows to truncate.
-            max_rows_per_column: Maximum rows to display for each column_name.
-            comparison_column_names: Optional column_name values to include.
 
         Returns:
             A DataFrame containing limited rows and ellipsis markers where needed.
@@ -995,14 +1012,13 @@ class ColumnComparison:
             ]
         )
 
-        if comparison_column_names is None:
-            column_name_rows = (
-                string_rows_df.select("column_name")
-                .distinct()
-                .orderBy("column_name")
-                .collect()
-            )
-            comparison_column_names = [row["column_name"] for row in column_name_rows]
+        comparison_column_names = [
+            row["column_name"]
+            for row in string_rows_df.select("column_name")
+            .distinct()
+            .orderBy("column_name")
+            .collect()
+        ]
 
         count_rows = string_rows_df.groupBy("column_name").count().collect()
         row_count_by_column = {row["column_name"]: row["count"] for row in count_rows}
@@ -1013,13 +1029,15 @@ class ColumnComparison:
                 spark_functions.col("column_name") == column_name
             )
 
-            limited_rows_df = column_rows_df.limit(max_rows_per_column).withColumn(
+            limited_rows_df = column_rows_df.limit(
+                self._max_rows_per_column
+            ).withColumn(
                 "display_order",
                 spark_functions.lit(display_index * 2),
             )
             truncated_column_dataframes.append(limited_rows_df)
 
-            if row_count_by_column.get(column_name, 0) > max_rows_per_column:
+            if row_count_by_column.get(column_name, 0) > self._max_rows_per_column:
                 ellipsis_row_df = (
                     column_rows_df.limit(1)
                     .select(
@@ -1054,13 +1072,13 @@ class ColumnComparison:
         # if no keys provided, then just compare the schema
         if not self._join_key_columns:
             schema_only_html = self.generate_html_tables(
-                [self._schema_comparison_df]
+                input_dataframes=[self._schema_comparison_df]
             )
             display(HTML(self._render_report_document(schema_only_html)))
             return
 
         selected_columns_schema_html = self.generate_html_tables(
-            [self._schema_comparison_df],
+            input_dataframes=[self._schema_comparison_df],
             titles=["Just specified column names compare"],
             descriptions=[
                 "Comparison of each column name and type to see if there are any differences in either"
@@ -1068,7 +1086,10 @@ class ColumnComparison:
         )
 
         value_comparison_html = self.generate_html_tables(
-            [self._difference_analysis_df, self._key_analysis_stats_df],
+            input_dataframes=[
+                self._difference_analysis_df,
+                self._key_analysis_stats_df,
+            ],
             titles=["Difference Analysis On Key", "Key Analysis Stats"],
             descriptions=[
                 "Display joined rows whose compared values differ",
@@ -1077,7 +1098,7 @@ class ColumnComparison:
         )
 
         key_uniqueness_html = self.generate_html_tables(
-            [self._primary_key_comparison_df],
+            input_dataframes=[self._primary_key_comparison_df],
             titles=["Distinct Primary Keys for Given Key"],
             descriptions=[
                 "the count of dinstinct primary key values for the given PK, for every table and the join of tables"
@@ -1086,7 +1107,7 @@ class ColumnComparison:
 
         # create final html table to display with buttons
         comparison_report_html = self.generate_html_button_switch(
-            [
+            table_html_fragments=[
                 selected_columns_schema_html,
                 value_comparison_html,
                 key_uniqueness_html,
