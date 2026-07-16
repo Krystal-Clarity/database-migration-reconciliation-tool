@@ -1,6 +1,6 @@
 import logging
-from html import escape
 from functools import lru_cache, reduce
+from html import escape
 from itertools import combinations
 from pathlib import Path
 
@@ -86,6 +86,10 @@ class ColumnComparison:
         self._initialize_comparison_dataframes()
 
     @property
+    def difference_analysis_df(self) -> DataFrame:
+        return self._difference_analysis_df
+
+    @property
     def input_dataframes(self) -> list[DataFrame]:
         return self._input_dataframes.copy()
 
@@ -95,10 +99,9 @@ class ColumnComparison:
         if hasattr(self, "_spark"):
             self._initialize_comparison_dataframes()
 
-    def _set_input_dataframes(self, value: list[DataFrame]) -> None:
-        if len(value) != 2:
-            raise ValueError("ColumnComparison requires exactly two DataFrames.")
-        self._input_dataframes = value.copy()
+    @property
+    def key_analysis_stats_df(self) -> DataFrame:
+        return self._key_analysis_stats_df
 
     @property
     def max_rows_per_column(self) -> int:
@@ -110,49 +113,13 @@ class ColumnComparison:
         if hasattr(self, "_spark"):
             self._initialize_comparison_dataframes()
 
-    def _validate_max_rows_per_column(self, value: int) -> int:
-        if not isinstance(value, int):
-            raise TypeError("max_rows_per_column must be an integer.")
-        if value < 1:
-            raise ValueError("max_rows_per_column must be at least 1.")
-        return value
-
-    def _initialize_comparison_dataframes(self) -> None:
-        if not self._join_key_columns:
-            self._schema_comparison_df = self.compare_schemas(
-                respect_column_order=False,
-                compare_all_columns=True,
-            )
-            self._difference_analysis_df = self._empty_difference_analysis_df()
-            self._key_analysis_stats_df = self._empty_key_analysis_stats_df()
-            self._primary_key_comparison_df = self._empty_primary_key_comparison_df()
-            return
-
-        self._schema_comparison_df = self.compare_schemas(respect_column_order=False)
-        mismatched_rows_df, all_comparison_rows_df = self.difference_analysis_on_keys()
-        self._key_analysis_stats_df = self.get_difference_analysis_stats(
-            comparison_rows_df=all_comparison_rows_df
-        )
-        self._difference_analysis_df = self.truncate_by_column_limit(
-            all_comparison_rows_df=mismatched_rows_df
-        )
-        self._primary_key_comparison_df = self.compare_pks()
+    @property
+    def primary_key_comparison_df(self) -> DataFrame:
+        return self._primary_key_comparison_df
 
     @property
     def schema_comparison_df(self) -> DataFrame:
         return self._schema_comparison_df
-
-    @property
-    def difference_analysis_df(self) -> DataFrame:
-        return self._difference_analysis_df
-
-    @property
-    def key_analysis_stats_df(self) -> DataFrame:
-        return self._key_analysis_stats_df
-
-    @property
-    def primary_key_comparison_df(self) -> DataFrame:
-        return self._primary_key_comparison_df
 
     def _empty_difference_analysis_df(self) -> DataFrame:
         return self._spark.createDataFrame(
@@ -193,6 +160,27 @@ class ColumnComparison:
             ),
         )
 
+    def _initialize_comparison_dataframes(self) -> None:
+        if not self._join_key_columns:
+            self._schema_comparison_df = self.compare_schemas(
+                respect_column_order=False,
+                compare_all_columns=True,
+            )
+            self._difference_analysis_df = self._empty_difference_analysis_df()
+            self._key_analysis_stats_df = self._empty_key_analysis_stats_df()
+            self._primary_key_comparison_df = self._empty_primary_key_comparison_df()
+            return
+
+        self._schema_comparison_df = self.compare_schemas(respect_column_order=False)
+        mismatched_rows_df, all_comparison_rows_df = self.difference_analysis_on_keys()
+        self._key_analysis_stats_df = self.get_difference_analysis_stats(
+            comparison_rows_df=all_comparison_rows_df
+        )
+        self._difference_analysis_df = self.truncate_by_column_limit(
+            all_comparison_rows_df=mismatched_rows_df
+        )
+        self._primary_key_comparison_df = self.compare_pks()
+
     def _render_report_document(
         self,
         body_html: str,
@@ -204,6 +192,514 @@ class ColumnComparison:
             .replace("__SCRIPT__", script_html)
             .replace("__BODY__", body_html)
         )
+
+    def _set_input_dataframes(self, value: list[DataFrame]) -> None:
+        if len(value) != 2:
+            raise ValueError("ColumnComparison requires exactly two DataFrames.")
+        self._input_dataframes = value.copy()
+
+    def _validate_max_rows_per_column(self, value: int) -> int:
+        if value < 1:
+            raise ValueError("max_rows_per_column must be at least 1.")
+        return value
+
+    def compare_pks(self) -> DataFrame:
+        """
+        Compares primary key stats (distinct and total counts) across multiple DataFrames
+        and their inner join.
+
+        Args:
+            self : class params
+
+        Returns:
+            A new table created from input tables with schema:
+                [Source, Distinct PK Rows, Total Rows]
+        """
+        self.logger.debug("compare_pks_multi called")
+        key_summary_rows = []
+        join_key_columns = self._join_key_columns
+
+        # Get unique count and total count for each DataFrame
+        for dataframe_index, dataframe in enumerate(self._input_dataframes):
+            key_columns_df = dataframe.select(join_key_columns)
+            distinct_count = key_columns_df.distinct().count()
+            total_count = dataframe.count()
+            key_summary_rows.append(
+                (
+                    f"DataFrame_{dataframe_index + 1}",
+                    distinct_count,
+                    total_count,
+                )
+            )
+
+        # Perform inner join across all DataFrames on PK
+        joined_keys_df = self._input_dataframes[0].select(join_key_columns)
+        for dataframe in self._input_dataframes[1:]:
+            joined_keys_df = joined_keys_df.join(
+                dataframe.select(join_key_columns),
+                on=join_key_columns,
+                how="inner",
+            )
+
+        # Get unique count and total count for the joined DataFrame
+        joined_distinct_count = joined_keys_df.distinct().count()
+        joined_total_count = joined_keys_df.count()
+        key_summary_rows.append(
+            ("Joined Tables", joined_distinct_count, joined_total_count)
+        )
+        self.logger.debug("compare_pks_multi completed successfully")
+        return self._spark.createDataFrame(
+            key_summary_rows,
+            ["Source", "Distinct PK Rows", "Total Rows"],
+        )
+
+    def compare_schemas(
+        self,
+        respect_column_order: bool = False,
+        compare_all_columns: bool = False,
+    ) -> DataFrame:
+        """
+        Compare schemas of multiple DataFrames and return the result.
+
+        Args:
+            respect_column_order: Whether column position is part of the comparison.
+            compare_all_columns: Whether to compare every input column instead of
+                using the configured columns_to_compare and join_key_columns.
+
+        Returns:
+            A Spark DataFrame containing the schema comparison.
+        """
+        self.logger.debug("compare_schemas called")
+
+        dataframe_count = len(self._input_dataframes)
+
+        selected_columns: list[str] = []
+        for column_name in [
+            *self._columns_to_compare,
+            *self._join_key_columns,
+        ]:
+            if column_name not in selected_columns:
+                selected_columns.append(column_name)
+
+        # Compare the selected columns, or every column when none were selected.
+        if compare_all_columns or not selected_columns:
+            dataframe_schemas = [
+                dataframe.schema for dataframe in self._input_dataframes
+            ]
+            schema_columns = [list(schema.fieldNames()) for schema in dataframe_schemas]
+        else:
+            dataframe_schemas = [
+                dataframe.select(*selected_columns).schema
+                for dataframe in self._input_dataframes
+            ]
+            schema_columns = [list(schema.fieldNames()) for schema in dataframe_schemas]
+        # Check if all DataFrames have the same schema
+        if respect_column_order:
+            # Build rows based on column position
+            maximum_column_count = max(len(columns) for columns in schema_columns)
+            rows: list[list[object]] = []
+            for position in range(maximum_column_count):
+                column_names_at_position = [
+                    schema_columns[dataframe_index][position]
+                    if position < len(schema_columns[dataframe_index])
+                    else ""
+                    for dataframe_index in range(dataframe_count)
+                ]
+                data_types_at_position = [
+                    str(
+                        dataframe_schemas[dataframe_index][
+                            column_names_at_position[dataframe_index]
+                        ].dataType
+                    )
+                    if column_names_at_position[dataframe_index]
+                    else ""
+                    for dataframe_index in range(dataframe_count)
+                ]
+                column_name_match = bool(
+                    column_names_at_position[0]
+                    and all(
+                        column_name == column_names_at_position[0]
+                        for column_name in column_names_at_position
+                    )
+                )
+                type_match = bool(
+                    data_types_at_position[0]
+                    and all(
+                        data_type == data_types_at_position[0]
+                        for data_type in data_types_at_position
+                    )
+                )
+                schema_row: list[object] = [position + 1]
+                # Add the schema name and type for each input DataFrame.
+                for column_name, data_type in zip(
+                    column_names_at_position,
+                    data_types_at_position,
+                    strict=True,
+                ):
+                    schema_row.extend([column_name, data_type])
+                schema_row.extend([column_name_match, type_match])
+                rows.append(schema_row)
+
+            # Construct headers dynamically
+            headers = ["Position"]
+            for dataframe_number in range(1, dataframe_count + 1):
+                headers.extend(
+                    [
+                        f"Schema {dataframe_number}",
+                        f"Type {dataframe_number}",
+                    ]
+                )
+            headers.extend(["Match", "Type Match"])
+            schema_comparison_df = self._spark.createDataFrame(rows, headers)
+
+        else:
+            # Unordered schema comparison
+            # This seems more useful for comparing schemas
+
+            # Get all column names across all DataFrames
+            all_columns = sorted(
+                {column_name for columns in schema_columns for column_name in columns}
+            )
+            rows = []
+
+            # Iterate through all columns and check their presence, types and uniqueness
+            for column_name in all_columns:
+                schema_presence_flags = [
+                    column_name in columns for columns in schema_columns
+                ]
+                data_types = [
+                    str(dataframe_schemas[dataframe_index][column_name].dataType)
+                    if schema_presence_flags[dataframe_index]
+                    else ""
+                    for dataframe_index in range(dataframe_count)
+                ]
+                appears_in_one_schema_only = sum(schema_presence_flags) == 1
+                type_match = bool(
+                    data_types[0]
+                    and all(data_type == data_types[0] for data_type in data_types)
+                )
+                comparison_row: list[object] = [column_name]
+                comparison_row.extend(schema_presence_flags)
+                comparison_row.extend(data_types)
+                comparison_row.extend([appears_in_one_schema_only, type_match])
+                rows.append(comparison_row)
+
+            headers = ["Column"]
+            headers.extend(
+                f"In Schema {dataframe_number}"
+                for dataframe_number in range(1, dataframe_count + 1)
+            )
+            headers.extend(
+                f"Type {dataframe_number}"
+                for dataframe_number in range(1, dataframe_count + 1)
+            )
+            headers.extend(["Appears In One Schema Only", "Type Match"])
+            schema_comparison_df = self._spark.createDataFrame(rows, headers)
+        self.logger.debug("compare_schemas completed successfully")
+        return schema_comparison_df.orderBy("Type Match", ascending=True)
+
+    def difference_analysis_on_keys(self) -> tuple[DataFrame, DataFrame]:
+        """
+        Performs a difference analysis on multiple DataFrames based on specified join keys.
+
+        Returns:
+            2 DataFrames:
+                1. mismatched_rows_df: Rows with different values across inputs.
+                2. all_comparison_rows_df: All rows used to calculate statistics.
+            Schema:
+                [*join_key_columns, column_name, df0_value, ...,
+                df{N-1}_value, column_match_i_j_..._N]
+        """
+        self.logger.debug("compare_dataframes_by_keys_multi_wide called")
+        join_key_columns = self._join_key_columns
+
+        # Determine the columns shared by every input DataFrame.
+        if self._compare_all_columns_for_differences:
+            shared_columns = list(
+                set.intersection(
+                    *(set(dataframe.columns) for dataframe in self._input_dataframes)
+                )
+            )
+        else:
+            selected_columns = [
+                *self._columns_to_compare,
+                *join_key_columns,
+            ]
+            shared_columns = list(
+                set(selected_columns).intersection(
+                    *(set(dataframe.columns) for dataframe in self._input_dataframes)
+                )
+            )
+        comparison_value_columns = [
+            column_name
+            for column_name in shared_columns
+            if column_name not in join_key_columns
+        ]
+
+        qualified_dataframes = [
+            dataframe.select(
+                *[
+                    spark_functions.col(column_name).alias(
+                        f"{column_name}_df{dataframe_index}"
+                    )
+                    for column_name in shared_columns
+                ]
+            )
+            for dataframe_index, dataframe in enumerate(self._input_dataframes)
+        ]
+
+        # join them all
+        def join_two(
+            left_dataframe: DataFrame,
+            right_dataframe: DataFrame,
+            left_dataframe_index: int,
+            right_dataframe_index: int,
+        ) -> DataFrame:
+            join_conditions = [
+                left_dataframe[f"{join_key_column}_df{left_dataframe_index}"]
+                == right_dataframe[f"{join_key_column}_df{right_dataframe_index}"]
+                for join_key_column in join_key_columns
+            ]
+            return left_dataframe.join(
+                right_dataframe,
+                on=join_conditions,
+                how="inner",
+            )
+
+        joined_comparison_df = qualified_dataframes[0]
+        for dataframe_index in range(1, len(qualified_dataframes)):
+            joined_comparison_df = join_two(
+                joined_comparison_df,
+                qualified_dataframes[dataframe_index],
+                dataframe_index - 1,
+                dataframe_index,
+            )
+
+        # start building the result DataFrame
+        # select the join keys and the non-key columns from each DataFrame
+        dataframe_count = len(self._input_dataframes)
+        dataframe_index_pairs = list(combinations(range(dataframe_count), 2))
+        comparison_dataframes = []
+
+        # iterate over each non-key column
+        for column_name in comparison_value_columns:
+            comparison_select_expressions = []
+            # create the join key columns
+            for join_key_column in join_key_columns:
+                comparison_select_expressions.append(
+                    spark_functions.col(f"{join_key_column}_df0").alias(join_key_column)
+                )
+            #  create the non-key column
+            comparison_select_expressions.append(
+                spark_functions.lit(column_name).alias("column_name")
+            )
+            # create dfX_value column
+            for dataframe_index in range(dataframe_count):
+                comparison_select_expressions.append(
+                    spark_functions.col(f"{column_name}_df{dataframe_index}")
+                    .cast("string")
+                    .alias(f"df{dataframe_index}_value")
+                )
+            # Add pairwise flags only when they differ from the all-input flag.
+            if self._include_pairwise_comparisons and dataframe_count > 2:
+                for (
+                    left_dataframe_index,
+                    right_dataframe_index,
+                ) in dataframe_index_pairs:
+                    comparison_select_expressions.append(
+                        spark_functions.when(
+                            spark_functions.expr(
+                                f"{column_name}_df{left_dataframe_index} <=> "
+                                f"{column_name}_df{right_dataframe_index}"
+                            ),
+                            spark_functions.lit(True),
+                        )
+                        .otherwise(spark_functions.lit(False))
+                        .alias(
+                            "column_match_"
+                            f"{left_dataframe_index}_{right_dataframe_index}"
+                        )
+                    )
+
+            # check if all columns match across all DataFrames
+            all_values_match_condition = " AND ".join(
+                f"{column_name}_df0 <=> {column_name}_df{dataframe_index}"
+                for dataframe_index in range(1, dataframe_count)
+            )
+            dataframe_index_suffix = "_".join(
+                str(dataframe_index) for dataframe_index in range(dataframe_count)
+            )
+            comparison_select_expressions.append(
+                spark_functions.when(
+                    spark_functions.expr(all_values_match_condition),
+                    spark_functions.lit(True),
+                )
+                .otherwise(spark_functions.lit(False))
+                .alias(f"column_match_{dataframe_index_suffix}")
+            )
+            # and add them to the result DataFrame
+            column_comparison_df = joined_comparison_df.select(
+                *comparison_select_expressions
+            )
+            comparison_dataframes.append(column_comparison_df)
+
+        comparison_rows_df = reduce(
+            DataFrame.unionByName,
+            comparison_dataframes,
+        )
+
+        all_comparison_rows_df = comparison_rows_df.orderBy("column_name")
+
+        # filter to only mismatches across all df?_value columns
+        # build the array of values, distinct it, and require size > 1
+        value_columns = [
+            spark_functions.col(f"df{dataframe_index}_value")
+            for dataframe_index in range(dataframe_count)
+        ]
+        mismatch_condition = (
+            spark_functions.size(
+                spark_functions.array_distinct(spark_functions.array(*value_columns))
+            )
+            > 1
+        )
+        mismatched_rows_df = comparison_rows_df.filter(mismatch_condition).orderBy(
+            "column_name"
+        )
+
+        self.logger.debug("difference_analysis_on_keys completed successfully")
+        return mismatched_rows_df, all_comparison_rows_df
+
+    def display_pretty(self) -> None:
+        """
+        Display the initialized comparison DataFrames as an interactive HTML report.
+        """
+        self.logger.debug("display_pretty called")
+
+        # if no keys provided, then just compare the schema
+        if not self._join_key_columns:
+            schema_only_html = self.generate_html_tables(
+                input_dataframes=[self._schema_comparison_df]
+            )
+            display(HTML(self._render_report_document(schema_only_html)))
+            return
+
+        selected_columns_schema_html = self.generate_html_tables(
+            input_dataframes=[self._schema_comparison_df],
+            titles=["Just specified column names compare"],
+            descriptions=[
+                "Comparison of each column name and type to see if there are any differences in either"
+            ],
+        )
+
+        value_comparison_html = self.generate_html_tables(
+            input_dataframes=[
+                self._difference_analysis_df,
+                self._key_analysis_stats_df,
+            ],
+            titles=["Difference Analysis On Key", "Key Analysis Stats"],
+            descriptions=[
+                "Display joined rows whose compared values differ",
+                "Statistics comparing matching and differing values",
+            ],
+        )
+
+        key_uniqueness_html = self.generate_html_tables(
+            input_dataframes=[self._primary_key_comparison_df],
+            titles=["Distinct Primary Keys for Given Key"],
+            descriptions=[
+                "the count of dinstinct primary key values for the given PK, for every table and the join of tables"
+            ],
+        )
+
+        # create final html table to display with buttons
+        comparison_report_html = self.generate_html_button_switch(
+            table_html_fragments=[
+                selected_columns_schema_html,
+                value_comparison_html,
+                key_uniqueness_html,
+            ],
+            titles=["Schema Comparison", "Column Comparison", "PK Comparison"],
+        )
+        self.logger.debug("Finished display_pretty")
+        display(HTML(comparison_report_html))
+
+    def generate_html_button_switch(
+        self,
+        table_html_fragments: list[str],
+        titles: list[str] | None = None,
+    ) -> str:
+        """
+        Generates HTML with toggle buttons to switch between multiple tables given input html tables from generate_html_tables.
+        titles and descriptions will usually be defined and not an option for the user to define.
+
+        Args:
+            table_html_fragments: HTML table strings from generate_html_tables.
+            titles: Optional titles for each button.
+
+        Returns:
+            HTML + javascript for tables visible by button click
+        """
+        self.logger.debug(
+            "Building button-switch HTML for %s tables",
+            len(table_html_fragments),
+        )
+
+        # Generate unique divs for each table
+        table_divs = ""
+        for table_index, table_html in enumerate(table_html_fragments):
+            div_id = f"table{table_index + 1}"
+            css_display = "block" if table_index == 0 else "none"
+            table_divs += (
+                f'<div id="{div_id}" role="tabpanel" '
+                f'aria-labelledby="btn-{div_id}" style="display:{css_display};">'
+                f"{table_html}</div>\n"
+            )
+
+        # JavaScript toggle logic
+        table_ids = ",".join(
+            f"'table{table_index + 1}'"
+            for table_index in range(len(table_html_fragments))
+        )
+        script = f"""
+        <script>
+        function showTable(id) {{
+            [{table_ids}].forEach(tableId => {{
+                const isActive = tableId === id;
+                document.getElementById(tableId).style.display = isActive ? 'block' : 'none';
+                const button = document.getElementById('btn-' + tableId);
+                button.classList.toggle('active', isActive);
+                button.setAttribute('aria-selected', isActive.toString());
+            }});
+        }}
+        </script>
+        """
+
+        # Buttons
+        button_html = '<div class="seg" role="tablist" aria-label="Comparison views">\n'
+        for table_index in range(len(table_html_fragments)):
+            label = (
+                titles[table_index]
+                if titles and table_index < len(titles)
+                else f"Table {table_index + 1}"
+            )
+            div_id = f"table{table_index + 1}"
+            active_class = ' class="active"' if table_index == 0 else ""
+            aria_selected = "true" if table_index == 0 else "false"
+            button_html += (
+                f'<button type="button" onclick="showTable(\'{div_id}\')" '
+                f'id="btn-{div_id}" role="tab" aria-controls="{div_id}" '
+                f'aria-selected="{aria_selected}"{active_class}>'
+                f"{escape(str(label))}</button>\n"
+            )
+        button_html += "</div>\n"
+
+        # Final HTML assembly
+        full_html = self._render_report_document(
+            '<div class="report-wrap">' + button_html + table_divs + "</div>",
+            script,
+        )
+        self.logger.debug("Finished generate_button_switch_html")
+        return full_html
 
     def generate_html_tables(
         self,
@@ -434,450 +930,6 @@ class ColumnComparison:
 
         return all_tables_html
 
-    def generate_html_button_switch(
-        self,
-        table_html_fragments: list[str],
-        titles: list[str] | None = None,
-    ) -> str:
-        """
-        Generates HTML with toggle buttons to switch between multiple tables given input html tables from generate_html_tables.
-        titles and descriptions will usually be defined and not an option for the user to define.
-
-        Args:
-            table_html_fragments: HTML table strings from generate_html_tables.
-            titles: Optional titles for each button.
-
-        Returns:
-            HTML + javascript for tables visible by button click
-        """
-        self.logger.debug(
-            "Building button-switch HTML for %s tables",
-            len(table_html_fragments),
-        )
-
-        # Generate unique divs for each table
-        table_divs = ""
-        for table_index, table_html in enumerate(table_html_fragments):
-            div_id = f"table{table_index + 1}"
-            css_display = "block" if table_index == 0 else "none"
-            table_divs += (
-                f'<div id="{div_id}" role="tabpanel" '
-                f'aria-labelledby="btn-{div_id}" style="display:{css_display};">'
-                f"{table_html}</div>\n"
-            )
-
-        # JavaScript toggle logic
-        table_ids = ",".join(
-            f"'table{table_index + 1}'"
-            for table_index in range(len(table_html_fragments))
-        )
-        script = f"""
-        <script>
-        function showTable(id) {{
-            [{table_ids}].forEach(tableId => {{
-                const isActive = tableId === id;
-                document.getElementById(tableId).style.display = isActive ? 'block' : 'none';
-                const button = document.getElementById('btn-' + tableId);
-                button.classList.toggle('active', isActive);
-                button.setAttribute('aria-selected', isActive.toString());
-            }});
-        }}
-        </script>
-        """
-
-        # Buttons
-        button_html = '<div class="seg" role="tablist" aria-label="Comparison views">\n'
-        for table_index in range(len(table_html_fragments)):
-            label = (
-                titles[table_index]
-                if titles and table_index < len(titles)
-                else f"Table {table_index + 1}"
-            )
-            div_id = f"table{table_index + 1}"
-            active_class = ' class="active"' if table_index == 0 else ""
-            aria_selected = "true" if table_index == 0 else "false"
-            button_html += (
-                f'<button type="button" onclick="showTable(\'{div_id}\')" '
-                f'id="btn-{div_id}" role="tab" aria-controls="{div_id}" '
-                f'aria-selected="{aria_selected}"{active_class}>'
-                f"{escape(str(label))}</button>\n"
-            )
-        button_html += "</div>\n"
-
-        # Final HTML assembly
-        full_html = self._render_report_document(
-            '<div class="report-wrap">' + button_html + table_divs + "</div>",
-            script,
-        )
-        self.logger.debug("Finished generate_button_switch_html")
-        return full_html
-
-    def compare_schemas(
-        self,
-        respect_column_order: bool = False,
-        compare_all_columns: bool = False,
-    ) -> DataFrame:
-        """
-        Compare schemas of multiple DataFrames and return the result.
-
-        Args:
-            respect_column_order: Whether column position is part of the comparison.
-            compare_all_columns: Whether to compare every input column instead of
-                using the configured columns_to_compare and join_key_columns.
-
-        Returns:
-            A Spark DataFrame containing the schema comparison.
-        """
-        self.logger.debug("compare_schemas called")
-
-        dataframe_count = len(self._input_dataframes)
-
-        selected_columns: list[str] = []
-        for column_name in [
-            *self._columns_to_compare,
-            *self._join_key_columns,
-        ]:
-            if column_name not in selected_columns:
-                selected_columns.append(column_name)
-
-        # Compare the selected columns, or every column when none were selected.
-        if compare_all_columns or not selected_columns:
-            dataframe_schemas = [
-                dataframe.schema for dataframe in self._input_dataframes
-            ]
-            schema_columns = [list(schema.fieldNames()) for schema in dataframe_schemas]
-        else:
-            dataframe_schemas = [
-                dataframe.select(*selected_columns).schema
-                for dataframe in self._input_dataframes
-            ]
-            schema_columns = [list(schema.fieldNames()) for schema in dataframe_schemas]
-        # Check if all DataFrames have the same schema
-        if respect_column_order:
-            # Build rows based on column position
-            maximum_column_count = max(len(columns) for columns in schema_columns)
-            rows: list[list[object]] = []
-            for position in range(maximum_column_count):
-                column_names_at_position = [
-                    schema_columns[dataframe_index][position]
-                    if position < len(schema_columns[dataframe_index])
-                    else ""
-                    for dataframe_index in range(dataframe_count)
-                ]
-                data_types_at_position = [
-                    str(
-                        dataframe_schemas[dataframe_index][
-                            column_names_at_position[dataframe_index]
-                        ].dataType
-                    )
-                    if column_names_at_position[dataframe_index]
-                    else ""
-                    for dataframe_index in range(dataframe_count)
-                ]
-                column_name_match = bool(
-                    column_names_at_position[0]
-                    and all(
-                        column_name == column_names_at_position[0]
-                        for column_name in column_names_at_position
-                    )
-                )
-                type_match = bool(
-                    data_types_at_position[0]
-                    and all(
-                        data_type == data_types_at_position[0]
-                        for data_type in data_types_at_position
-                    )
-                )
-                schema_row: list[object] = [position + 1]
-                # Add the schema name and type for each input DataFrame.
-                for column_name, data_type in zip(
-                    column_names_at_position,
-                    data_types_at_position,
-                    strict=True,
-                ):
-                    schema_row.extend([column_name, data_type])
-                schema_row.extend([column_name_match, type_match])
-                rows.append(schema_row)
-
-            # Construct headers dynamically
-            headers = ["Position"]
-            for dataframe_number in range(1, dataframe_count + 1):
-                headers.extend(
-                    [
-                        f"Schema {dataframe_number}",
-                        f"Type {dataframe_number}",
-                    ]
-                )
-            headers.extend(["Match", "Type Match"])
-            schema_comparison_df = self._spark.createDataFrame(rows, headers)
-
-        else:
-            # Unordered schema comparison
-            # This seems more useful for comparing schemas
-
-            # Get all column names across all DataFrames
-            all_columns = sorted(
-                {column_name for columns in schema_columns for column_name in columns}
-            )
-            rows = []
-
-            # Iterate through all columns and check their presence, types and uniqueness
-            for column_name in all_columns:
-                schema_presence_flags = [
-                    column_name in columns for columns in schema_columns
-                ]
-                data_types = [
-                    str(dataframe_schemas[dataframe_index][column_name].dataType)
-                    if schema_presence_flags[dataframe_index]
-                    else ""
-                    for dataframe_index in range(dataframe_count)
-                ]
-                appears_in_one_schema_only = sum(schema_presence_flags) == 1
-                type_match = bool(
-                    data_types[0]
-                    and all(data_type == data_types[0] for data_type in data_types)
-                )
-                comparison_row: list[object] = [column_name]
-                comparison_row.extend(schema_presence_flags)
-                comparison_row.extend(data_types)
-                comparison_row.extend([appears_in_one_schema_only, type_match])
-                rows.append(comparison_row)
-
-            headers = ["Column"]
-            headers.extend(
-                f"In Schema {dataframe_number}"
-                for dataframe_number in range(1, dataframe_count + 1)
-            )
-            headers.extend(
-                f"Type {dataframe_number}"
-                for dataframe_number in range(1, dataframe_count + 1)
-            )
-            headers.extend(["Appears In One Schema Only", "Type Match"])
-            schema_comparison_df = self._spark.createDataFrame(rows, headers)
-        self.logger.debug("compare_schemas completed successfully")
-        return schema_comparison_df.orderBy("Type Match", ascending=True)
-
-    def compare_pks(self) -> DataFrame:
-        """
-        Compares primary key stats (distinct and total counts) across multiple DataFrames
-        and their inner join.
-
-        Args:
-            self : class params
-
-        Returns:
-            A new table created from input tables with schema:
-                [Source, Distinct PK Rows, Total Rows]
-        """
-        self.logger.debug("compare_pks_multi called")
-        key_summary_rows = []
-        join_key_columns = self._join_key_columns
-
-        # Get unique count and total count for each DataFrame
-        for dataframe_index, dataframe in enumerate(self._input_dataframes):
-            key_columns_df = dataframe.select(join_key_columns)
-            distinct_count = key_columns_df.distinct().count()
-            total_count = dataframe.count()
-            key_summary_rows.append(
-                (
-                    f"DataFrame_{dataframe_index + 1}",
-                    distinct_count,
-                    total_count,
-                )
-            )
-
-        # Perform inner join across all DataFrames on PK
-        joined_keys_df = self._input_dataframes[0].select(join_key_columns)
-        for dataframe in self._input_dataframes[1:]:
-            joined_keys_df = joined_keys_df.join(
-                dataframe.select(join_key_columns),
-                on=join_key_columns,
-                how="inner",
-            )
-
-        # Get unique count and total count for the joined DataFrame
-        joined_distinct_count = joined_keys_df.distinct().count()
-        joined_total_count = joined_keys_df.count()
-        key_summary_rows.append(
-            ("Joined Tables", joined_distinct_count, joined_total_count)
-        )
-        self.logger.debug("compare_pks_multi completed successfully")
-        return self._spark.createDataFrame(
-            key_summary_rows,
-            ["Source", "Distinct PK Rows", "Total Rows"],
-        )
-
-    def difference_analysis_on_keys(self) -> tuple[DataFrame, DataFrame]:
-        """
-        Performs a difference analysis on multiple DataFrames based on specified join keys.
-
-        Returns:
-            2 DataFrames:
-                1. mismatched_rows_df: Rows with different values across inputs.
-                2. all_comparison_rows_df: All rows used to calculate statistics.
-            Schema:
-                [*join_key_columns, column_name, df0_value, ...,
-                df{N-1}_value, column_match_i_j_..._N]
-        """
-        self.logger.debug("compare_dataframes_by_keys_multi_wide called")
-        join_key_columns = self._join_key_columns
-
-        # Determine the columns shared by every input DataFrame.
-        if self._compare_all_columns_for_differences:
-            shared_columns = list(
-                set.intersection(
-                    *(set(dataframe.columns) for dataframe in self._input_dataframes)
-                )
-            )
-        else:
-            selected_columns = [
-                *self._columns_to_compare,
-                *join_key_columns,
-            ]
-            shared_columns = list(
-                set(selected_columns).intersection(
-                    *(set(dataframe.columns) for dataframe in self._input_dataframes)
-                )
-            )
-        comparison_value_columns = [
-            column_name
-            for column_name in shared_columns
-            if column_name not in join_key_columns
-        ]
-
-        qualified_dataframes = [
-            dataframe.select(
-                *[
-                    spark_functions.col(column_name).alias(
-                        f"{column_name}_df{dataframe_index}"
-                    )
-                    for column_name in shared_columns
-                ]
-            )
-            for dataframe_index, dataframe in enumerate(self._input_dataframes)
-        ]
-
-        # join them all
-        def join_two(
-            left_dataframe: DataFrame,
-            right_dataframe: DataFrame,
-            left_dataframe_index: int,
-            right_dataframe_index: int,
-        ) -> DataFrame:
-            join_conditions = [
-                left_dataframe[f"{join_key_column}_df{left_dataframe_index}"]
-                == right_dataframe[f"{join_key_column}_df{right_dataframe_index}"]
-                for join_key_column in join_key_columns
-            ]
-            return left_dataframe.join(
-                right_dataframe,
-                on=join_conditions,
-                how="inner",
-            )
-
-        joined_comparison_df = qualified_dataframes[0]
-        for dataframe_index in range(1, len(qualified_dataframes)):
-            joined_comparison_df = join_two(
-                joined_comparison_df,
-                qualified_dataframes[dataframe_index],
-                dataframe_index - 1,
-                dataframe_index,
-            )
-
-        # start building the result DataFrame
-        # select the join keys and the non-key columns from each DataFrame
-        dataframe_count = len(self._input_dataframes)
-        dataframe_index_pairs = list(combinations(range(dataframe_count), 2))
-        comparison_dataframes = []
-
-        # iterate over each non-key column
-        for column_name in comparison_value_columns:
-            comparison_select_expressions = []
-            # create the join key columns
-            for join_key_column in join_key_columns:
-                comparison_select_expressions.append(
-                    spark_functions.col(f"{join_key_column}_df0").alias(join_key_column)
-                )
-            #  create the non-key column
-            comparison_select_expressions.append(
-                spark_functions.lit(column_name).alias("column_name")
-            )
-            # create dfX_value column
-            for dataframe_index in range(dataframe_count):
-                comparison_select_expressions.append(
-                    spark_functions.col(f"{column_name}_df{dataframe_index}")
-                    .cast("string")
-                    .alias(f"df{dataframe_index}_value")
-                )
-            # Add pairwise flags only when they differ from the all-input flag.
-            if self._include_pairwise_comparisons and dataframe_count > 2:
-                for (
-                    left_dataframe_index,
-                    right_dataframe_index,
-                ) in dataframe_index_pairs:
-                    comparison_select_expressions.append(
-                        spark_functions.when(
-                            spark_functions.expr(
-                                f"{column_name}_df{left_dataframe_index} <=> "
-                                f"{column_name}_df{right_dataframe_index}"
-                            ),
-                            spark_functions.lit(True),
-                        )
-                        .otherwise(spark_functions.lit(False))
-                        .alias(
-                            "column_match_"
-                            f"{left_dataframe_index}_{right_dataframe_index}"
-                        )
-                    )
-
-            # check if all columns match across all DataFrames
-            all_values_match_condition = " AND ".join(
-                f"{column_name}_df0 <=> {column_name}_df{dataframe_index}"
-                for dataframe_index in range(1, dataframe_count)
-            )
-            dataframe_index_suffix = "_".join(
-                str(dataframe_index) for dataframe_index in range(dataframe_count)
-            )
-            comparison_select_expressions.append(
-                spark_functions.when(
-                    spark_functions.expr(all_values_match_condition),
-                    spark_functions.lit(True),
-                )
-                .otherwise(spark_functions.lit(False))
-                .alias(f"column_match_{dataframe_index_suffix}")
-            )
-            # and add them to the result DataFrame
-            column_comparison_df = joined_comparison_df.select(
-                *comparison_select_expressions
-            )
-            comparison_dataframes.append(column_comparison_df)
-
-        comparison_rows_df = reduce(
-            DataFrame.unionByName,
-            comparison_dataframes,
-        )
-
-        all_comparison_rows_df = comparison_rows_df.orderBy("column_name")
-
-        # filter to only mismatches across all df?_value columns
-        # build the array of values, distinct it, and require size > 1
-        value_columns = [
-            spark_functions.col(f"df{dataframe_index}_value")
-            for dataframe_index in range(dataframe_count)
-        ]
-        mismatch_condition = (
-            spark_functions.size(
-                spark_functions.array_distinct(spark_functions.array(*value_columns))
-            )
-            > 1
-        )
-        mismatched_rows_df = comparison_rows_df.filter(mismatch_condition).orderBy(
-            "column_name"
-        )
-
-        self.logger.debug("difference_analysis_on_keys completed successfully")
-        return mismatched_rows_df, all_comparison_rows_df
-
     def get_difference_analysis_stats(
         self,
         comparison_rows_df: DataFrame,
@@ -1062,57 +1114,3 @@ class ColumnComparison:
 
         self.logger.debug("truncate_by_column_limit completed successfully")
         return truncated_rows_df.orderBy("display_order").drop("display_order")
-
-    def display_pretty(self) -> None:
-        """
-        Display the initialized comparison DataFrames as an interactive HTML report.
-        """
-        self.logger.debug("display_pretty called")
-
-        # if no keys provided, then just compare the schema
-        if not self._join_key_columns:
-            schema_only_html = self.generate_html_tables(
-                input_dataframes=[self._schema_comparison_df]
-            )
-            display(HTML(self._render_report_document(schema_only_html)))
-            return
-
-        selected_columns_schema_html = self.generate_html_tables(
-            input_dataframes=[self._schema_comparison_df],
-            titles=["Just specified column names compare"],
-            descriptions=[
-                "Comparison of each column name and type to see if there are any differences in either"
-            ],
-        )
-
-        value_comparison_html = self.generate_html_tables(
-            input_dataframes=[
-                self._difference_analysis_df,
-                self._key_analysis_stats_df,
-            ],
-            titles=["Difference Analysis On Key", "Key Analysis Stats"],
-            descriptions=[
-                "Display joined rows whose compared values differ",
-                "Statistics comparing matching and differing values",
-            ],
-        )
-
-        key_uniqueness_html = self.generate_html_tables(
-            input_dataframes=[self._primary_key_comparison_df],
-            titles=["Distinct Primary Keys for Given Key"],
-            descriptions=[
-                "the count of dinstinct primary key values for the given PK, for every table and the join of tables"
-            ],
-        )
-
-        # create final html table to display with buttons
-        comparison_report_html = self.generate_html_button_switch(
-            table_html_fragments=[
-                selected_columns_schema_html,
-                value_comparison_html,
-                key_uniqueness_html,
-            ],
-            titles=["Schema Comparison", "Column Comparison", "PK Comparison"],
-        )
-        self.logger.debug("Finished display_pretty")
-        display(HTML(comparison_report_html))
