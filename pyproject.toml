@@ -1,7 +1,20 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "database-migration-reconciliation-tool"
+authors = [
+    {name = "Angus Blance", email = "angus.blance@krystalclarity.com"},
+]
 version = "0.1.0"
-description = "Add your description here"
+description = "compare old tables to new ones when migrating database systems quickly"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "ipython>=9.15.0",
+    "pyspark>=4.2.0",
+]
+
+[tool.setuptools]
+py-modules = ["column_comparison"]
