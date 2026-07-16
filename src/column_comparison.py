@@ -1,8 +1,8 @@
 import logging
-from functools import lru_cache, reduce
-from pathlib import Path
 from html import escape
+from functools import lru_cache, reduce
 from itertools import combinations
+from pathlib import Path
 
 import pyspark.sql.functions as spark_functions
 from IPython.display import HTML, display
@@ -15,10 +15,6 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
-
-from opal.common.functions.get_logger import get_logger
-from opal.common.functions.get_spark import get_spark
-
 
 _ASSET_DIR = Path(__file__).resolve().parent
 
@@ -53,7 +49,8 @@ class ColumnComparison:
         columns_to_compare: list[str] | None = None,
         logger_level: int = logging.INFO,
     ) -> None:
-        self.logger = get_logger(__name__, logger_level=logger_level)
+        self.logger: logging.Logger = logging.getLogger(__name__)
+        self.logger.setLevel(logger_level)
         self.logger.debug("Initializing ColumnComparison")
         self.logger.debug(
             "input_dataframes count=%s, join_key_columns=%s, "
@@ -67,14 +64,12 @@ class ColumnComparison:
         self._include_pairwise_comparisons: bool = include_pairwise_comparisons
         self._columns_to_compare: list[str] = columns_to_compare or []
         self._compare_all_columns_for_differences = columns_to_compare is None
-        spark_session = (
-            get_spark()
-            or SparkSession.getActiveSession()
-            or SparkSession.builder.getOrCreate()
-        )
+        spark_session: SparkSession | None = SparkSession.getActiveSession()
         if spark_session is None:
+            spark_session = SparkSession.builder.getOrCreate()
+        if not isinstance(spark_session, SparkSession):
             raise RuntimeError("A Spark session is required for column comparison.")
-        self._spark = spark_session
+        self._spark: SparkSession = spark_session
 
         self._schema_comparison_df: DataFrame
         self._difference_analysis_df: DataFrame
