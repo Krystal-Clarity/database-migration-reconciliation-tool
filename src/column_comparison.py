@@ -36,9 +36,9 @@ class ColumnComparison:
         columns_to_compare: Non-key columns whose values should be compared.
         logger_level: Logging level for the logger.
 
-    Applicable comparison DataFrames are generated during initialization and
-    exposed through read-only properties. Call ``display_pretty()`` to render
-    those stored DataFrames as an interactive HTML report.
+    Applicable comparison DataFrames are generated during initialization as
+    public attributes. Call ``display_pretty()`` to render those stored
+    DataFrames as an interactive HTML report.
     """
 
     def __init__(
@@ -64,27 +64,18 @@ class ColumnComparison:
         self._include_pairwise_comparisons: bool = include_pairwise_comparisons
         self._columns_to_compare: list[str] = columns_to_compare or []
         self._compare_all_columns_for_differences = columns_to_compare is None
-        spark_session: SparkSession | None = SparkSession.getActiveSession()
-        if spark_session is None:
-            spark_session = SparkSession.builder.getOrCreate()
-        if not isinstance(spark_session, SparkSession):
-            raise RuntimeError("A Spark session is required for column comparison.")
-        self._spark: SparkSession = spark_session
-        self._max_rows_per_column = self._validate_max_rows_per_column(
-            max_rows_per_column
+        spark_session: SparkSession = (
+            SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
         )
+        self._spark: SparkSession = spark_session
+        self.max_rows_per_column = max_rows_per_column
 
-        self._schema_comparison_df: DataFrame
-        self._difference_analysis_df: DataFrame
-        self._key_analysis_stats_df: DataFrame
-        self._primary_key_comparison_df: DataFrame
+        self.schema_comparison_df: DataFrame
+        self.difference_analysis_df: DataFrame
+        self.key_analysis_stats_df: DataFrame
+        self.primary_key_comparison_df: DataFrame
 
-        self._set_input_dataframes(input_dataframes)
-        self._initialize_comparison_dataframes()
-
-    @property
-    def difference_analysis_df(self) -> DataFrame:
-        return self._difference_analysis_df
+        self.input_dataframes = input_dataframes
 
     @property
     def input_dataframes(self) -> list[DataFrame]:
@@ -92,13 +83,11 @@ class ColumnComparison:
 
     @input_dataframes.setter
     def input_dataframes(self, value: list[DataFrame]) -> None:
-        self._set_input_dataframes(value)
+        if len(value) != 2:
+            raise ValueError("ColumnComparison requires exactly two DataFrames.")
+        self._input_dataframes = value.copy()
         if hasattr(self, "_spark"):
             self._initialize_comparison_dataframes()
-
-    @property
-    def key_analysis_stats_df(self) -> DataFrame:
-        return self._key_analysis_stats_df
 
     @property
     def max_rows_per_column(self) -> int:
@@ -106,17 +95,11 @@ class ColumnComparison:
 
     @max_rows_per_column.setter
     def max_rows_per_column(self, value: int) -> None:
-        self._max_rows_per_column = self._validate_max_rows_per_column(value)
-        if hasattr(self, "_spark"):
+        if value < 1:
+            raise ValueError("max_rows_per_column must be at least 1.")
+        self._max_rows_per_column = value
+        if hasattr(self, "_spark") and hasattr(self, "_input_dataframes"):
             self._initialize_comparison_dataframes()
-
-    @property
-    def primary_key_comparison_df(self) -> DataFrame:
-        return self._primary_key_comparison_df
-
-    @property
-    def schema_comparison_df(self) -> DataFrame:
-        return self._schema_comparison_df
 
     def _empty_difference_analysis_df(self) -> DataFrame:
         return self._spark.createDataFrame(
@@ -159,24 +142,25 @@ class ColumnComparison:
 
     def _initialize_comparison_dataframes(self) -> None:
         if not self._join_key_columns:
-            self._schema_comparison_df = self.compare_schemas(
+            # if join keys are not specified then we just give the schema comparison
+            self.schema_comparison_df = self.compare_schemas(
                 respect_column_order=False,
                 compare_all_columns=True,
             )
-            self._difference_analysis_df = self._empty_difference_analysis_df()
-            self._key_analysis_stats_df = self._empty_key_analysis_stats_df()
-            self._primary_key_comparison_df = self._empty_primary_key_comparison_df()
+            self.difference_analysis_df = self._empty_difference_analysis_df()
+            self.key_analysis_stats_df = self._empty_key_analysis_stats_df()
+            self.primary_key_comparison_df = self._empty_primary_key_comparison_df()
             return
 
-        self._schema_comparison_df = self.compare_schemas(respect_column_order=False)
+        self.schema_comparison_df = self.compare_schemas(respect_column_order=False)
         mismatched_rows_df, all_comparison_rows_df = self.difference_analysis_on_keys()
-        self._key_analysis_stats_df = self.get_difference_analysis_stats(
+        self.key_analysis_stats_df = self.get_difference_analysis_stats(
             comparison_rows_df=all_comparison_rows_df
         )
-        self._difference_analysis_df = self.truncate_by_column_limit(
+        self.difference_analysis_df = self.truncate_by_column_limit(
             all_comparison_rows_df=mismatched_rows_df
         )
-        self._primary_key_comparison_df = self.compare_pks()
+        self.primary_key_comparison_df = self.compare_pks()
 
     def _render_report_document(
         self,
@@ -189,16 +173,6 @@ class ColumnComparison:
             .replace("__SCRIPT__", script_html)
             .replace("__BODY__", body_html)
         )
-
-    def _set_input_dataframes(self, value: list[DataFrame]) -> None:
-        if len(value) != 2:
-            raise ValueError("ColumnComparison requires exactly two DataFrames.")
-        self._input_dataframes = value.copy()
-
-    def _validate_max_rows_per_column(self, value: int) -> int:
-        if value < 1:
-            raise ValueError("max_rows_per_column must be at least 1.")
-        return value
 
     def compare_pks(self) -> DataFrame:
         """
@@ -292,7 +266,6 @@ class ColumnComparison:
             schema_columns = [list(schema.fieldNames()) for schema in dataframe_schemas]
         # Check if all DataFrames have the same schema
         if respect_column_order:
-            # Build rows based on column position
             maximum_column_count = max(len(columns) for columns in schema_columns)
             rows: list[list[object]] = []
             for position in range(maximum_column_count):
@@ -350,16 +323,11 @@ class ColumnComparison:
             schema_comparison_df = self._spark.createDataFrame(rows, headers)
 
         else:
-            # Unordered schema comparison
-            # This seems more useful for comparing schemas
-
-            # Get all column names across all DataFrames
             all_columns = sorted(
                 {column_name for columns in schema_columns for column_name in columns}
             )
             rows = []
 
-            # Iterate through all columns and check their presence, types and uniqueness
             for column_name in all_columns:
                 schema_presence_flags = [
                     column_name in columns for columns in schema_columns
@@ -576,13 +544,13 @@ class ColumnComparison:
         # if no keys provided, then just compare the schema
         if not self._join_key_columns:
             schema_only_html = self.generate_html_tables(
-                input_dataframes=[self._schema_comparison_df]
+                input_dataframes=[self.schema_comparison_df]
             )
             display(HTML(self._render_report_document(schema_only_html)))
             return
 
         selected_columns_schema_html = self.generate_html_tables(
-            input_dataframes=[self._schema_comparison_df],
+            input_dataframes=[self.schema_comparison_df],
             titles=["Just specified column names compare"],
             descriptions=[
                 "Comparison of each column name and type to see if there are any differences in either"
@@ -591,8 +559,8 @@ class ColumnComparison:
 
         value_comparison_html = self.generate_html_tables(
             input_dataframes=[
-                self._difference_analysis_df,
-                self._key_analysis_stats_df,
+                self.difference_analysis_df,
+                self.key_analysis_stats_df,
             ],
             titles=["Difference Analysis On Key", "Key Analysis Stats"],
             descriptions=[
@@ -602,7 +570,7 @@ class ColumnComparison:
         )
 
         key_uniqueness_html = self.generate_html_tables(
-            input_dataframes=[self._primary_key_comparison_df],
+            input_dataframes=[self.primary_key_comparison_df],
             titles=["Distinct Primary Keys for Given Key"],
             descriptions=[
                 "the count of dinstinct primary key values for the given PK, for every table and the join of tables"
@@ -1107,6 +1075,12 @@ class ColumnComparison:
                     )
                 )
                 truncated_column_dataframes.append(ellipsis_row_df)
+
+        if not truncated_column_dataframes:
+            self.logger.debug(
+                "truncate_by_column_limit found no rows to truncate; returning empty DataFrame"
+            )
+            return all_comparison_rows_df.limit(0)
 
         truncated_rows_df = reduce(
             lambda left_dataframe, right_dataframe: left_dataframe.unionByName(
