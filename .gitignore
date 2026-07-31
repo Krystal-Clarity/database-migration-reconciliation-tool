@@ -206,9 +206,6 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
-# Project-local agent skills
-skills/
-
 # PyPI configuration file
 .pypirc
 
