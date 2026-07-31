@@ -17,4 +17,13 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["column_comparison"]
+packages = ["column_comparison"]
+
+[tool.setuptools.package-dir]
+column_comparison = "src/database-migration-reconciliation-tool"
+
+[tool.setuptools.package-data]
+column_comparison = ["index.html", "styles.css"]
+
+[tool.ruff.lint]
+ignore = ["N999"]
