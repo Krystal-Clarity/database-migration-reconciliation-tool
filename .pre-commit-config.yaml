@@ -1,0 +1,26 @@
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uvx ruff check
+        language: system
+        types: [python]
+        args: [--fix]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uvx ruff format
+        language: system
+        types: [python]
