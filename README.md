@@ -9,7 +9,7 @@ DataFrame.
 
 ```python
 %pip install --force-reinstall --no-deps \
-  "/Workspace/Users/angus.blance@krystalclarity.com/data-reconciliation-tool/database_migration_reconciliation_tool-0.1.0-py3-none-any.whl"
+  "<workspace-wheel-path>/database_migration_reconciliation_tool-0.1.0-py3-none-any.whl"
 
 from column_comparison import ColumnComparison
 
@@ -25,6 +25,9 @@ comparison = ColumnComparison(
 
 comparison.display_pretty()
 ```
+
+Replace `<workspace-wheel-path>` with the workspace location where your team
+publishes the wheel.
 
 The interactive report has Schema Comparison, Column Comparison, and PK
 Comparison views. Generated Spark DataFrames are also available on the object,
