@@ -69,13 +69,17 @@ class ColumnComparison:
         self._columns_to_compare: list[str] = columns_to_compare or []
         self._compare_all_columns_for_differences: bool = columns_to_compare is None
         self._compare_all_schema_columns: bool = compare_all_schema_columns
-        self.max_rows_per_primary_key: int = max_rows_per_primary_key
+        if max_rows_per_primary_key < 1:
+            raise ValueError("max_rows_per_primary_key must be at least 1.")
+        self._max_rows_per_primary_key: int = max_rows_per_primary_key
         self._dataset_row_counts: list[int] = []
         spark_session: SparkSession = (
             SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
         )
         self._spark: SparkSession = spark_session
-        self.max_rows_per_column: int = max_rows_per_column
+        if max_rows_per_column < 1:
+            raise ValueError("max_rows_per_column must be at least 1.")
+        self._max_rows_per_column: int = max_rows_per_column
 
         self.schema_comparison_df: DataFrame
         self.difference_analysis_df: DataFrame
@@ -129,8 +133,7 @@ class ColumnComparison:
         if len(value) != 2:
             raise ValueError("ColumnComparison requires exactly two DataFrames.")
         self._input_dataframes = value.copy()
-        if hasattr(self, "_spark"):
-            self._initialize_comparison_dataframes()
+        self._initialize_comparison_dataframes()
 
     @property
     def max_rows_per_column(self) -> int:
@@ -141,8 +144,7 @@ class ColumnComparison:
         if value < 1:
             raise ValueError("max_rows_per_column must be at least 1.")
         self._max_rows_per_column = value
-        if hasattr(self, "_spark") and hasattr(self, "_input_dataframes"):
-            self._initialize_comparison_dataframes()
+        self._initialize_comparison_dataframes()
 
     @property
     def max_rows_per_primary_key(self) -> int:
@@ -888,7 +890,9 @@ class ColumnComparison:
             previous_group_value = None
             previous_schema_group = None
             for row in rows:
-                row_values = dict(zip(column_names, row, strict=True))
+                row_values: dict[str, object] = dict(
+                    zip(column_names, row, strict=True)
+                )
                 status_label = ""
 
                 if is_schema_table:
@@ -978,19 +982,17 @@ class ColumnComparison:
                     elif column_name == "match_percentage":
                         css_classes.append("dgrid-percent-match")
 
-                    value = row_values[column_name]
+                    value: object = row_values[column_name]
                     if column_name in schema_presence_columns:
                         display_value = "yes" if value is True else "—"
                     elif value is None or value == "":
                         display_value = "—"
-                    elif column_name.endswith("_percentage") and isinstance(
-                        value, (int, float)
-                    ):
-                        display_value = f"{value:.1f}%"
-                    elif isinstance(value, int) and (
+                    elif column_name.endswith("_percentage"):
+                        display_value = f"{float(value):.1f}%"
+                    elif (
                         "count" in column_name.lower() or "rows" in column_name.lower()
                     ):
-                        display_value = f"{value:,}"
+                        display_value = f"{int(value):,}"
                     else:
                         display_value = str(value)
 
