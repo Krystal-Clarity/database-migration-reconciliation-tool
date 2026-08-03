@@ -8,7 +8,7 @@ authors = [
     {name = "Angus Blance", email = "angus.blance@krystalclarity.com"},
 ]
 version = "0.1.0"
-description = "compare old tables to new ones when migrating database systems quickly"
+description = "compare old DataFrames to new DataFrames during database migrations"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
