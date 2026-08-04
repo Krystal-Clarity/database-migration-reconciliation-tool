@@ -1,7 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap');
 
 body { font-family:'Archivo',Arial,sans-serif; background:#f3f2f2; color:#201e1d; margin:0; }
-.report-wrap { max-width:1180px; margin:0 auto; padding:32px 24px 120px; }
+.report-wrap { width:100%; box-sizing:border-box; margin:0 auto; padding:32px clamp(16px,2vw,28px) 120px; }
 .report-toolbar { display:flex; align-items:center; justify-content:space-between; gap:24px; flex-wrap:wrap; }
 .report-header { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; flex-wrap:wrap; margin-bottom:24px; }
 .report-kicker { font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#ae1800; font-weight:600; margin-bottom:8px; }
